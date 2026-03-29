@@ -26,6 +26,7 @@ module Network.PushNotify.APN
     , sendMessage
     , sendSilentMessage
     , sendRawMessage
+    , sendRawMessageWithType
     , alertMessage
     , bodyMessage
     , emptyMessage
@@ -212,6 +213,7 @@ instance FromJSON InterruptionLevel where
 -- | The push type for the notification (for HTTP/2 apns-push-type header).
 data ApnPushType = ApnPushTypeAlert
                  | ApnPushTypeBackground
+                 | ApnPushTypeLiveActivity
                  | ApnPushTypeWidgets
                  deriving (Enum, Eq, Show, Generic)
 
@@ -224,19 +226,22 @@ data ApnPriority = ApnPriorityImmediate    -- ^ 10: Send immediately, triggers a
 -- | Get the default priority for a push type according to APNS spec
 -- Returns Nothing for widgets (no priority header should be sent)
 defaultPriorityForPushType :: ApnPushType -> Maybe ApnPriority
-defaultPriorityForPushType ApnPushTypeBackground = Just ApnPriorityPowerEfficient  -- Required by spec
 defaultPriorityForPushType ApnPushTypeAlert = Just ApnPriorityImmediate
+defaultPriorityForPushType ApnPushTypeBackground = Just ApnPriorityPowerEfficient  -- Required by spec
+defaultPriorityForPushType ApnPushTypeLiveActivity = Just ApnPriorityImmediate
 defaultPriorityForPushType ApnPushTypeWidgets = Nothing  -- No priority header for widgets
 
 instance ToJSON ApnPushType where
     toJSON ApnPushTypeAlert = String "alert"
-    toJSON ApnPushTypeBackground = String "background"  
+    toJSON ApnPushTypeBackground = String "background"
+    toJSON ApnPushTypeLiveActivity = "liveactivity"
     toJSON ApnPushTypeWidgets = String "widgets"
 
 instance FromJSON ApnPushType where
     parseJSON = withText "ApnPushType" $ \t -> case t of
         "alert" -> pure ApnPushTypeAlert
         "background" -> pure ApnPushTypeBackground
+        "liveactivity" -> pure ApnPushTypeLiveActivity
         "widgets" -> pure ApnPushTypeWidgets
         _ -> fail "Invalid push type"
 
@@ -710,6 +715,18 @@ closeApnConnection connection =
     _close (apnConnectionConnection connection)
 
 
+sendRawMessageWithType
+    :: ApnSession
+    -> ApnToken
+    -> Maybe ByteString
+    -> ApnPushType
+    -> Maybe ApnPriority
+    -> ByteString
+    -> IO ApnMessageResult
+sendRawMessageWithType s deviceToken mJwtToken pushType mPriority payload = catchErrors $
+    withConnection s $ \c ->
+        sendApnRaw c deviceToken mJwtToken pushType mPriority payload
+
 -- | Send a raw payload as a push notification message (advanced)
 sendRawMessage
     :: ApnSession
@@ -869,7 +886,7 @@ sendApnRaw connection deviceToken mJwtBearerToken pushType mPriority message = b
         getHeaderEx name headers = fromMaybe (throw $ ApnExceptionMissingHeader name) (DL.lookup name headers)
 
         defaultHeaders :: Text -> ByteString -> ByteString -> ApnPushType -> Maybe ApnPriority -> [(HTTP.HeaderName, ByteString)]
-        defaultHeaders hostname token topic pushType mPriority = 
+        defaultHeaders hostname token topic pushType mPriority =
             [ ( ":method", "POST" )
             , ( ":scheme", "https" )
             , ( ":authority", TE.encodeUtf8 hostname )
@@ -880,10 +897,12 @@ sendApnRaw connection deviceToken mJwtBearerToken pushType mPriority message = b
           where
             pushTypeHeader = case pushType of
                 ApnPushTypeAlert -> "alert"
-                ApnPushTypeBackground -> "background"  
+                ApnPushTypeBackground -> "background"
+                ApnPushTypeLiveActivity -> "liveactivity"
                 ApnPushTypeWidgets -> "widgets"
             adjustedTopic = case pushType of
                 ApnPushTypeWidgets -> topic `S.append` ".push-type.widgets"
+                ApnPushTypeLiveActivity -> topic `S.append` ".push-type.liveactivity"
                 ApnPushTypeAlert -> topic
                 ApnPushTypeBackground -> topic
             priorityValue :: ApnPriority -> ByteString
