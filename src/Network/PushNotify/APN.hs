@@ -159,7 +159,7 @@ data ApnException = ApnExceptionHTTP ErrorCode
 instance Exception ApnException
 
 -- | The result of a send request
-data ApnMessageResult = ApnMessageResultOk
+data ApnMessageResult = ApnMessageResultOk ApnSuccessHeaders
                       | ApnMessageResultBackoff
                       | ApnMessageResultFatalError ApnFatalError
                       | ApnMessageResultTemporaryError ApnTemporaryError
@@ -853,11 +853,11 @@ sendApnRaw connection deviceToken mJwtBearerToken pushType mPriority message = b
                     Left err -> throwIO (ApnExceptionHTTP err)
                     Right hdrs1 -> do
                         let status       = getHeaderEx ":status" hdrs1
-                            -- apns-id      = getHeaderEx "apns-id" hdrs1
+                            -- apns-id   = getHeaderEx "apns-id" hdrs1
                             [Right body] = frameResponses
 
                         return $ case status of
-                            "200" -> ApnMessageResultOk
+                            "200" -> readSuccessHeaders ApnMessageResultOk hdrs1
                             "400" -> decodeReason ApnMessageResultFatalError body
                             "403" -> decodeReason ApnMessageResultFatalError body
                             "405" -> decodeReason ApnMessageResultFatalError body
@@ -881,6 +881,18 @@ sendApnRaw connection deviceToken mJwtBearerToken pushType mPriority message = b
                 decodeBody body =
                     eitherDecode body
                         >>= parseEither (\obj -> ctor <$> obj .: "reason")
+
+        readSuccessHeaders :: (ApnSuccessHeaders -> ApnMessageResult) -> [HTTP2.Header] -> ApnMessageResult
+        readSuccessHeaders ctor hdrs =
+            let successHeaders =
+                    ApnSuccessHeaders
+                        { apnsId = maybeGetHeader "apns-id" hdrs,
+                          apnsUniqueId = maybeGetHeader "apns-unique-id" hdrs
+                        }
+             in ctor successHeaders
+
+        maybeGetHeader :: HTTP.HeaderName -> [HTTP2.Header] -> Maybe ByteString
+        maybeGetHeader = DL.lookup
 
         getHeaderEx :: HTTP.HeaderName -> [HTTP2.Header] -> ByteString
         getHeaderEx name headers = fromMaybe (throw $ ApnExceptionMissingHeader name) (DL.lookup name headers)
@@ -921,6 +933,11 @@ catchErrors = catchIOErrors . catchClientErrors
         catchClientErrors act =
             either ApnMessageResultClientError id <$> runClientIO act
 
+
+data ApnSuccessHeaders = ApnSuccessHeaders
+    { apnsId :: Maybe ByteString,
+      apnsUniqueId :: Maybe ByteString
+    } deriving (Eq, Show)
 
 -- The type of permanent error indicated by APNS
 -- See https://apple.co/2RDCdWC table 8-6 for the meaning of each value.
